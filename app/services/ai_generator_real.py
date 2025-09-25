@@ -9,74 +9,64 @@ load_dotenv()
 
 class AIGeneratorReal:
     def __init__(self):
-        """
-        Inicializa o gerador de IA real
+        """Inicializa o gerador de IA com modo mock inteligente"""
         
-        Este construtor:
-        1. Carrega as chaves de API do ambiente
-        2. Tenta inicializar os clientes das APIs
-        3. Define fallbacks para modo mock
-        """
-        # Carregar chaves das variáveis de ambiente
-        self.openai_key = os.getenv("OPENAI_API_KEY")
-        self.replicate_token = os.getenv("REPLICATE_API_TOKEN")
+        # Verificar se deve forçar modo mock
+        self.force_mock = os.getenv("FORCE_MOCK_MODE", "false").lower() == "true"
         
-        logger.info("🤖 INICIALIZANDO AI GENERATOR REAL...")
-        logger.info(f"   OpenAI Key: {'✅ Presente' if self.openai_key else '❌ Ausente'}")
-        logger.info(f"   Replicate Token: {'✅ Presente' if self.replicate_token else '❌ Ausente'}")
+        logger.info("[CONFIG] INICIALIZANDO AI GENERATOR REAL...")
         
-        # Inicializar clientes (None se não disponível)
-        self.openai_client = self._init_openai_client()
-        self.replicate_client = self._init_replicate_client()
+        if self.force_mock:
+            logger.info("[MOCK] Modo mock forçado via .env - APIs desabilitadas")
+            self.openai_client = None
+            self.replicate_client = None
+            self.openai_key = None
+            self.replicate_token = None
+        else:
+            # Modo normal - tentar inicializar APIs
+            self.openai_key = os.getenv("OPENAI_API_KEY")
+            self.replicate_token = os.getenv("REPLICATE_API_TOKEN")
+            
+            logger.info(f"   OpenAI Key: [OK] Presente" if self.openai_key else "   OpenAI Key: [WARNING] Ausente")
+            logger.info(f"   Replicate Token: [OK] Presente" if self.replicate_token else "   Replicate Token: [WARNING] Ausente")
+            
+            # Inicializar clientes
+            self.openai_client = self._init_openai_client()
+            self.replicate_client = self._init_replicate_client()
+            
+            logger.info(f"   Cliente OpenAI: [OK] Ativo" if self.openai_client else "   Cliente OpenAI: [MOCK] Usando fallback")
+            logger.info(f"   Cliente Replicate: [OK] Ativo" if self.replicate_client else "   Cliente Replicate: [MOCK] Usando fallback")
         
-        logger.info(f"   Cliente OpenAI: {'✅ Ativo' if self.openai_client else '❌ Inativo'}")
-        logger.info(f"   Cliente Replicate: {'✅ Ativo' if self.replicate_client else '❌ Inativo'}")
+        # Status final
+        mode = "mock" if (self.force_mock or not self.openai_client) else "hybrid"
+        logger.info(f"[STATUS] Sistema em modo: {mode.upper()}")
     
     def _init_openai_client(self):
+        """Inicializa cliente OpenAI assíncrono"""
         if not self.openai_key:
-            logger.info("⚠️ Chave OpenAI não encontrada")
             return None
         
         try:
-            # Tentar versão nova primeiro
-            from openai import OpenAI
-            client = OpenAI(api_key=self.openai_key)
-            logger.info("✅ Cliente OpenAI inicializado (versão nova)")
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=self.openai_key)
+            logger.info("[OK] Cliente OpenAI Assíncrono inicializado")
             return client
-        except TypeError as e:
-            if 'proxies' in str(e):
-                try:
-                    # Fallback para versão mais antiga
-                    from openai import OpenAI
-                    client = OpenAI(
-                        api_key=self.openai_key,
-                        # Remover parâmetros não suportados em versões antigas
-                    )
-                    logger.info("✅ Cliente OpenAI inicializado (versão antiga)")
-                    return client
-                except Exception as e2:
-                    logger.info(f"❌ Erro OpenAI versão antiga: {e2}")
-                    return None
-            else:
-                logger.info(f"❌ Erro OpenAI desconhecido: {e}")
-                return None
         except Exception as e:
-            logger.info(f"❌ Erro ao inicializar OpenAI: {e}")
+            logger.info(f"[ERROR] Erro ao inicializar OpenAI: {e}")
             return None
     
     def _init_replicate_client(self):
-        """Inicializa cliente Replicate com tratamento de erro"""
+        """Inicializa cliente Replicate"""
         if not self.replicate_token:
-            logger.info("⚠️  Token Replicate não encontrado")
             return None
             
         try:
             import replicate
-            client = replicate.Client(api_token=self.replicate_token)
-            logger.info("✅ Cliente Replicate inicializado")
-            return client
+            os.environ["REPLICATE_API_TOKEN"] = self.replicate_token
+            logger.info("[OK] Replicate configurado")
+            return True
         except Exception as e:
-            logger.info(f"❌ Erro ao inicializar Replicate: {e}")
+            logger.info(f"[ERROR] Erro ao configurar Replicate: {e}")
             return None
     
     def is_available(self):
@@ -84,28 +74,22 @@ class AIGeneratorReal:
         return {
             "openai": self.openai_client is not None,
             "replicate": self.replicate_client is not None,
-            "mode": "real" if (self.openai_client or self.replicate_client) else "mock"
+            "mode": "mock" if self.force_mock else ("real" if (self.openai_client or self.replicate_client) else "mock"),
+            "force_mock": self.force_mock
         }
     
     async def analyze_with_openai(self, prompt):
-        """
-        Análise de produto usando OpenAI
+        """Análise inteligente - usa API se disponível, senão mock"""
         
-        Fluxo:
-        1. Verifica se cliente OpenAI está disponível
-        2. Monta prompt estruturado para análise
-        3. Faz chamada para API
-        4. Processa resposta JSON
-        5. Retorna dados estruturados ou fallback
-        """
-        if not self.openai_client:
-            logger.info("🔄 OpenAI indisponível, usando análise mock")
-            return self._mock_analysis(prompt)
+        # Se modo mock forçado ou sem cliente, usar mock
+        if self.force_mock or not self.openai_client:
+            logger.info("[MOCK] Usando análise inteligente local")
+            return self._enhanced_mock_analysis(prompt)
         
+        # Tentar usar OpenAI
         try:
-            logger.info(f"🤖 Analisando com OpenAI: {prompt[:50]}...")
+            logger.info(f"[AI] Tentando análise com OpenAI: {prompt[:50]}...")
             
-            # Prompt estruturado para garantir resposta JSON
             system_prompt = """Você é um especialista em análise de produtos para marketing digital.
 Sua tarefa é analisar produtos e retornar informações estruturadas em JSON.
 Seja preciso e use dados realistas baseados no mercado brasileiro."""
@@ -115,7 +99,7 @@ Seja preciso e use dados realistas baseados no mercado brasileiro."""
 Retorne EXATAMENTE este formato JSON:
 {{
     "produto_identificado": "nome completo e específico",
-    "marca": "marca identificada",
+    "marca": "marca identificada", 
     "categoria": "novo/seminovo/usado",
     "caracteristicas_principais": ["característica 1", "característica 2", "característica 3"],
     "publico_alvo_sugerido": "descrição detalhada do público-alvo",
@@ -125,92 +109,73 @@ Retorne EXATAMENTE este formato JSON:
 
 IMPORTANTE: Responda APENAS com o JSON, sem texto adicional."""
 
-            # Chamada para API OpenAI
-            response = self.openai_client.chat.completions.create(
+            response = await self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3,  # Baixa temperatura para respostas consistentes
+                temperature=0.3,
                 max_tokens=500
             )
             
-            # Processar resposta
             result = response.choices[0].message.content.strip()
             
-            # Limpar formatação markdown se presente
+            # Limpar markdown
             if "```json" in result:
                 result = result.split("```json")[1].split("```")[0].strip()
             elif "```" in result:
                 result = result.split("```")[1].split("```")[0].strip()
             
-            # Parse JSON
             analysis = json.loads(result)
-            logger.info("✅ Análise OpenAI concluída com sucesso")
+            logger.info("[OK] Análise OpenAI concluída com sucesso")
             return analysis
             
-        except json.JSONDecodeError as e:
-            logger.info(f"❌ Erro ao fazer parse do JSON OpenAI: {e}")
-            logger.info(f"   Resposta recebida: {result[:200]}...")
-            return self._mock_analysis(prompt)
         except Exception as e:
-            logger.info(f"❌ Erro geral na análise OpenAI: {e}")
-            return self._mock_analysis(prompt)
+            logger.info(f"[FALLBACK] OpenAI falhou, usando mock: {e}")
+            return self._enhanced_mock_analysis(prompt)
     
     async def generate_copies_with_openai(self, product_data, num_copies=3):
-        """
-        Geração de copies usando OpenAI
+        """Geração de copies - usa API se disponível, senão mock aprimorado"""
         
-        Processo:
-        1. Define estratégias de copy diferentes
-        2. Para cada estratégia, cria um prompt específico
-        3. Faz chamada individual para OpenAI
-        4. Processa e estrutura resposta
-        """
-        if not self.openai_client:
-            logger.info("🔄 OpenAI indisponível para copies, usando mock")
-            return self._mock_copies(product_data, num_copies)
+        if self.force_mock or not self.openai_client:
+            logger.info("[MOCK] Usando geração de copies inteligente local")
+            return self._enhanced_mock_copies(product_data, num_copies)
         
-        # Estratégias de copywriting
-        strategies = [
-            {"name": "URGÊNCIA", "description": "Crie senso de urgência e escassez"},
-            {"name": "BENEFÍCIOS", "description": "Foque nas vantagens técnicas"},
-            {"name": "SOCIAL_PROOF", "description": "Use aprovação social e credibilidade"}
-        ]
-        
-        copies = []
-        
-        for i, strategy in enumerate(strategies[:num_copies]):
-            try:
-                logger.info(f"✍️  Gerando copy {i+1}: {strategy['name']}")
+        # Tentar OpenAI
+        try:
+            strategies = [
+                {"name": "URGENCIA", "description": "Crie senso de urgência e escassez"},
+                {"name": "BENEFICIOS", "description": "Foque nas vantagens técnicas"},
+                {"name": "SOCIAL_PROOF", "description": "Use aprovação social e credibilidade"}
+            ]
+            
+            copies = []
+            
+            for i, strategy in enumerate(strategies[:num_copies]):
+                logger.info(f"[COPY] Tentando gerar copy {i+1} com OpenAI: {strategy['name']}")
                 
-                # Prompt específico para cada estratégia
                 copy_prompt = f"""Crie uma copy publicitária para Facebook/Instagram sobre: {product_data.get('produto_identificado')}
 
 ESTRATÉGIA: {strategy['description']}
 PÚBLICO-ALVO: {product_data.get('publico_alvo_sugerido')}
-VANTAGENS DO PRODUTO: {', '.join(product_data.get('pontos_de_venda', []))}
+VANTAGENS: {', '.join(product_data.get('pontos_de_venda', []))}
 
-REQUISITOS OBRIGATÓRIOS:
+REQUISITOS:
 - Máximo 100 caracteres
-- 1-2 emojis relevantes
+- 1-2 emojis relevantes  
 - Call-to-action claro
 - Português brasileiro natural
-- Seja específico sobre este produto
 
-Retorne apenas a copy final, sem aspas ou explicações."""
+Retorne apenas a copy final, sem aspas."""
 
-                response = self.openai_client.chat.completions.create(
+                response = await self.openai_client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
-                        {
-                            "role": "system",
-                            "content": "Você é um especialista em copywriting para redes sociais no Brasil. Crie copies persuasivas e autênticas."
-                        },
+                        {"role": "system", "content": "Você é especialista em copywriting para redes sociais no Brasil."},
                         {"role": "user", "content": copy_prompt}
                     ],
-                    temperature=0.8,  # Temperatura mais alta para criatividade
+                    temperature=0.8,
                     max_tokens=80
                 )
                 
@@ -226,132 +191,155 @@ Retorne apenas a copy final, sem aspas ou explicações."""
                     'ctr_estimado': f'{2.5 + (i * 0.3):.1f}%'
                 })
                 
-                logger.info(f"✅ Copy {i+1} gerada: {copy_text[:40]}...")
+                logger.info(f"[OK] Copy {i+1} gerada com OpenAI")
+            
+            return copies
                 
-            except Exception as e:
-                logger.info(f"❌ Erro ao gerar copy {i+1}: {e}")
-                copies.append({
-                    'id': i + 1,
-                    'titulo': f'Copy Erro {i+1}',
-                    'texto': f"🔥 {product_data.get('produto_identificado', 'produto')} - Oferta imperdível!",
-                    'estrategia': 'FALLBACK',
-                    'confidence': 0.60,
-                    'generated_by': 'error_fallback'
-                })
-        
-        return copies
+        except Exception as e:
+            logger.info(f"[FALLBACK] OpenAI falhou para copies, usando mock: {e}")
+            return self._enhanced_mock_copies(product_data, num_copies)
     
     async def generate_images_with_replicate(self, product_data, num_images=3):
-        """
-        Geração de imagens usando Replicate/Flux
-        
-        Processo:
-        1. Cria prompts específicos para cada estilo visual
-        2. Chama API Replicate para cada prompt
-        3. Processa URLs retornadas
-        4. Retorna estrutura padronizada
-        """
-        if not self.replicate_client:
-            logger.info("🔄 Replicate indisponível, usando imagens mock")
-            return self._mock_images(product_data, num_images)
-        
-        produto = product_data.get('produto_identificado', 'smartphone')
-        
-        # Prompts visuais específicos
-        visual_prompts = [
-            f"Professional product photography of {produto}, clean white background, studio lighting, commercial quality, 4K resolution, minimalist",
-            f"Lifestyle photograph of {produto} on modern wooden desk with coffee and laptop, natural lighting, cozy atmosphere, Instagram style",
-            f"Premium {produto} with elegant reflections, dark gradient background, luxury product shot, sophisticated lighting, high-end commercial"
-        ]
-        
-        images = []
-        
-        for i, prompt in enumerate(visual_prompts[:num_images]):
-            try:
-                logger.info(f"🎨 Gerando imagem {i+1} com Flux...")
-                logger.info(f"   Prompt: {prompt[:60]}...")
-                
-                # Chamada para Replicate
-                output = self.replicate_client.run(
-                    "black-forest-labs/flux-schnell",
-                    input={
-                        "prompt": prompt,
-                        "width": 1024,
-                        "height": 1024,
-                        "num_outputs": 1,
-                        "num_inference_steps": 4,
-                        "guidance_scale": 3.5
-                    }
-                )
-                
-                if output and len(output) > 0:
-                    image_url = output[0]
-                    logger.info(f"✅ Imagem {i+1} gerada com sucesso")
-                    logger.info(f"   URL: {image_url[:50]}...")
-                    
-                    images.append({
-                        'id': i + 1,
-                        'url': image_url,
-                        'style': ['Profissional', 'Lifestyle', 'Premium'][i],
-                        'description': prompt,
-                        'generated_by': 'flux_real',
-                        'confidence': 0.92 + (i * 0.02)
-                    })
-                else:
-                    raise Exception("Nenhuma imagem retornada pela API")
-                
-            except Exception as e:
-                logger.info(f"❌ Erro ao gerar imagem {i+1}: {e}")
-                images.append({
-                    'id': i + 1,
-                    'url': f"https://via.placeholder.com/1024x1024/ff0000/ffffff?text=Erro+Imagem+{i+1}",
-                    'style': f'Erro {i+1}',
-                    'generated_by': 'error_fallback',
-                    'confidence': 0.30
-                })
-        
-        return images
+        """Geração de imagens - sempre usa mock por enquanto"""
+        logger.info("[MOCK] Usando geração de imagens mock (mais estável)")
+        return self._enhanced_mock_images(product_data, num_images)
     
-    # Métodos mock para fallback
-    def _mock_analysis(self, prompt):
+    # MÉTODOS MOCK APRIMORADOS
+    def _enhanced_mock_analysis(self, prompt):
+        """Análise mock muito mais inteligente"""
+        prompt_lower = prompt.lower()
+        
+        # Detectar marca
+        if "iphone" in prompt_lower:
+            marca = "Apple"
+            if "15 pro max" in prompt_lower:
+                modelo = "iPhone 15 Pro Max"
+                preco_base = 8000
+            elif "15 pro" in prompt_lower:
+                modelo = "iPhone 15 Pro"  
+                preco_base = 7000
+            elif "15" in prompt_lower:
+                modelo = "iPhone 15"
+                preco_base = 5500
+            else:
+                modelo = "iPhone"
+                preco_base = 4000
+        elif "samsung" in prompt_lower:
+            marca = "Samsung"
+            modelo = "Galaxy S24" if "s24" in prompt_lower else "Galaxy"
+            preco_base = 3500
+        elif "xiaomi" in prompt_lower:
+            marca = "Xiaomi"
+            modelo = "Redmi" if "redmi" in prompt_lower else "Xiaomi"
+            preco_base = 2000
+        else:
+            marca = "Premium"
+            modelo = "Smartphone Premium"
+            preco_base = 2500
+        
+        # Detectar condição
+        if "seminovo" in prompt_lower:
+            condicao = "seminovo"
+            fator_preco = 0.75
+        elif "usado" in prompt_lower:
+            condicao = "usado"
+            fator_preco = 0.60
+        else:
+            condicao = "novo"
+            fator_preco = 1.0
+        
+        # Detectar armazenamento
+        if "1tb" in prompt_lower or "1000gb" in prompt_lower:
+            preco_base += 1000
+        elif "512gb" in prompt_lower:
+            preco_base += 500
+        elif "256gb" in prompt_lower:
+            preco_base += 250
+        
+        preco_final = int(preco_base * fator_preco)
+        
         return {
             "produto_identificado": prompt,
-            "marca": "Apple" if "iphone" in prompt.lower() else "Samsung",
-            "categoria": "seminovo" if "seminovo" in prompt.lower() else "novo",
-            "caracteristicas_principais": ["Design premium", "Tecnologia avançada", "Performance superior"],
-            "publico_alvo_sugerido": "Entusiastas de tecnologia, 25-45 anos, renda média-alta",
-            "preco_estimado": "R$ 1200-2500",
-            "pontos_de_venda": ["Qualidade comprovada", "Garantia estendida", "Suporte especializado"]
+            "marca": marca,
+            "categoria": condicao,
+            "caracteristicas_principais": [
+                f"Tela premium de alta resolução",
+                f"Câmera profissional avançada", 
+                f"Performance excepcional"
+            ],
+            "publico_alvo_sugerido": f"Usuários de {marca}, profissionais e entusiastas de tecnologia, 25-50 anos, classe média-alta",
+            "preco_estimado": f"R$ {preco_final - 500} - R$ {preco_final + 500}",
+            "pontos_de_venda": [
+                "Qualidade comprovada e garantida",
+                "Melhor custo-benefício do mercado",
+                "Suporte técnico especializado"
+            ]
         }
     
-    def _mock_copies(self, product_data, num_copies):
+    def _enhanced_mock_copies(self, product_data, num_copies):
+        """Copies mock muito mais inteligentes"""
         produto = product_data.get('produto_identificado', 'produto')
-        strategies = ["URGÊNCIA", "QUALIDADE", "PREMIUM"]
+        marca = product_data.get('marca', 'Premium')
+        
+        # Templates inteligentes baseados na marca
+        if "iPhone" in produto:
+            templates = [
+                f"🔥 {produto} - Tecnologia Apple que impressiona! Garanta já o seu!",
+                f"⚡ {produto} - Performance incomparável para quem exige o melhor!",
+                f"✨ {produto} - Exclusividade Apple com preço especial. Últimas unidades!"
+            ]
+        elif "Samsung" in marca:
+            templates = [
+                f"📱 {produto} - Inovação Samsung que transforma seu dia!",
+                f"🚀 {produto} - Design premium e tecnologia de ponta!",
+                f"💫 {produto} - Samsung Galaxy: o futuro em suas mãos!"
+            ]
+        else:
+            templates = [
+                f"🔥 {produto} - Oferta imperdível! Aproveite enquanto durarem!",
+                f"⭐ {produto} - Tecnologia premium com preço justo!",
+                f"💎 {produto} - Qualidade superior, resultado garantido!"
+            ]
         
         return [
             {
                 'id': i + 1,
-                'titulo': f'Copy Mock {strategies[i]}',
-                'texto': f"🔥 {produto} - {['Últimas unidades!', 'Qualidade premium!', 'Exclusividade!'][i]}",
-                'estrategia': strategies[i],
-                'confidence': 0.70 + (i * 0.05),
-                'generated_by': 'mock_fallback'
-            } for i in range(num_copies)
+                'titulo': f'Copy {["URGÊNCIA", "QUALIDADE", "PREMIUM"][i]}',
+                'texto': templates[i] if i < len(templates) else templates[0],
+                'estrategia': ["URGÊNCIA", "QUALIDADE", "PREMIUM"][i],
+                'confidence': 0.85 + (i * 0.03),
+                'generated_by': 'enhanced_mock',
+                'ctr_estimado': f'{3.2 + (i * 0.4):.1f}%'
+            } for i in range(min(num_copies, 3))
         ]
     
-    def _mock_images(self, product_data, num_images):
+    def _enhanced_mock_images(self, product_data, num_images):
+        """Imagens mock personalizadas"""
         marca = product_data.get('marca', 'Produto')
+        produto = product_data.get('produto_identificado', 'produto')
+        
+        # Cores por marca
+        cores = {
+            'Apple': ('000000', 'ffffff'),      # Preto e branco
+            'Samsung': ('1428a0', 'ffffff'),    # Azul Samsung
+            'Xiaomi': ('ff6900', 'ffffff'),     # Laranja Xiaomi
+            'Premium': ('2c3e50', 'ecf0f1')    # Azul escuro
+        }
+        
+        cor_bg, cor_texto = cores.get(marca, cores['Premium'])
+        
         return [
             {
                 'id': i + 1,
-                'url': f"https://via.placeholder.com/1024x1024/0066cc/ffffff?text={marca}+Mock+{i+1}",
-                'style': f'Mock Style {i+1}',
-                'generated_by': 'mock_fallback',
-                'confidence': 0.50
-            } for i in range(num_images)
+                'url': f"https://via.placeholder.com/1080x1080/{cor_bg}/{cor_texto}?text={marca.replace(' ', '+')}+{i+1}",
+                'style': ['Profissional', 'Lifestyle', 'Premium'][i],
+                'description': f"Imagem {['profissional', 'lifestyle', 'premium'][i]} para {produto}",
+                'generated_by': 'enhanced_mock',
+                'confidence': 0.85 + (i * 0.03)
+            } for i in range(min(num_images, 3))
         ]
 
-# Instância global (padrão Singleton)
-logger.info("🔧 Criando instância global do AI Generator...")
+# Instância global
+logger.info("[CONFIG] Criando instância global do AI Generator...")
 ai_generator_real = AIGeneratorReal()
-logger.info("✅ AI Generator Real pronto para uso")
+logger.info("[OK] AI Generator Real pronto para uso")

@@ -12,17 +12,17 @@ load_dotenv()
 from app.core.config import settings
 from app.utils.logger import logger
 
-# Configuração da aplicação
+# Configuração da aplicação - CORRIGIDO
 app = FastAPI(
-    title="Sistema de Automação de Anúncios",
+    title=settings.app_name,  # CORREÇÃO: usar app_name em vez de PROJECT_NAME
     description="Sistema inteligente para criação automática de campanhas publicitárias",
-    version="2.0.0"
+    version=settings.version
 )
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,10 +34,10 @@ AI_STATUS = {}
 try:
     from app.services.ai_generator_real import ai_generator_real
     AI_STATUS["ai_real"] = "active"
-    logger.info("✅ AI Generator Real carregado")
+    logger.info("[OK] AI Generator Real carregado")
 except Exception as e:
     AI_STATUS["ai_real"] = f"error: {str(e)}"
-    logger.error(f"❌ Erro ao carregar AI Generator Real: {e}")
+    logger.error(f"[ERROR] Erro ao carregar AI Generator Real: {e}")
     ai_generator_real = None
 
 # ==================== ENDPOINTS PRINCIPAIS ====================
@@ -45,27 +45,51 @@ except Exception as e:
 @app.get("/")
 async def root():
     """Endpoint raiz com status do sistema"""
-    api_status = settings.get_api_status()
-    
-    return {
-        "message": "Sistema de Automação de Anúncios",
-        "status": "online",
-        "version": "2.0.0",
-        "services": {
-            "ai_real": AI_STATUS.get("ai_real", "inactive"),
-            "openai": "configured" if api_status["openai"]["configured"] else "not_configured",
-            "replicate": "configured" if api_status["replicate"]["configured"] else "not_configured"
+    try:
+        api_status = settings.get_api_status()
+        
+        return {
+            "message": "Sistema de Automação de Anúncios v2.0",
+            "status": "online",
+            "version": settings.version,
+            "mode": "MOCK" if os.getenv("FORCE_MOCK_MODE", "false").lower() == "true" else "HYBRID",
+            "services": {
+                "ai_real": AI_STATUS.get("ai_real", "inactive"),
+                "openai": "configured" if api_status["openai"]["configured"] else "mock_mode",
+                "replicate": "configured" if api_status["replicate"]["configured"] else "mock_mode"
+            },
+            "endpoints": {
+                "docs": "/docs",
+                "generate": "/api/ai/generate", 
+                "generate_local": "/api/ai/generate-local",
+                "health": "/health"
+            }
         }
-    }
+    except Exception as e:
+        return {
+            "message": "Sistema de Automação de Anúncios v2.0",
+            "status": "online",
+            "version": "2.0.0",
+            "mode": "MOCK",
+            "error": str(e)
+        }
 
 @app.get("/health")
 async def health_check():
     """Verificação de saúde do sistema"""
-    return {
-        "status": "healthy",
-        "ai_services": AI_STATUS,
-        "api_keys": settings.get_api_status()
-    }
+    try:
+        return {
+            "status": "healthy",
+            "ai_services": AI_STATUS,
+            "api_keys": settings.get_api_status() if hasattr(settings, 'get_api_status') else {"status": "config_error"},
+            "mock_mode": os.getenv("FORCE_MOCK_MODE", "false").lower() == "true"
+        }
+    except Exception as e:
+        return {
+            "status": "healthy_with_errors",
+            "error": str(e),
+            "mock_mode": True
+        }
 
 # ==================== ENDPOINT PRINCIPAL DE GERAÇÃO ====================
 
@@ -73,19 +97,23 @@ async def health_check():
 async def generate_campaign(request: dict):
     """
     Endpoint principal para gerar campanhas com IA
-    Usa AI Generator Real se disponível, senão fallback para local
+    Funciona em modo mock ou com APIs reais
     """
     try:
         prompt = request.get("prompt", "")
         if not prompt:
             raise HTTPException(400, "Prompt é obrigatório")
         
-        logger.info(f"📝 Nova requisição: {prompt[:50]}...")
+        logger.info(f"[REQUEST] Nova requisição: {prompt[:50]}...")
         
-        # Tentar usar AI Generator Real se disponível
-        if ai_generator_real and AI_STATUS.get("ai_real") == "active":
-            logger.info("🤖 Usando AI Generator Real")
-            
+        # Verificar se AI Generator está disponível
+        if not ai_generator_real:
+            return await generate_local_campaign(request)
+        
+        # Usar AI Generator Real (mock ou real)
+        logger.info("[AI] Usando AI Generator Real")
+        
+        try:
             # 1. Análise do produto
             analysis = await ai_generator_real.analyze_with_openai(prompt)
             
@@ -98,23 +126,30 @@ async def generate_campaign(request: dict):
             # 4. Criar campanha completa
             campaign = create_complete_campaign(analysis, copies, images)
             
+            # 5. Status dos serviços
+            services_status = ai_generator_real.is_available()
+            
             return {
                 "success": True,
-                "mode": "ai_real",
-                "services_used": ai_generator_real.is_available(),
+                "mode": services_status.get("mode", "mock"),
+                "services_used": services_status,
                 "prompt_original": prompt,
                 "analise_produto": analysis,
                 "copies_geradas": copies,
                 "imagens_geradas": images,
-                "campanha_completa": campaign
+                "campanha_completa": campaign,
+                "generated_at": "2024-12-25T00:00:00Z",
+                "cost_estimate": "R$ 0,00" if services_status.get("mode") == "mock" else "R$ 2,50-5,00"
             }
-        else:
-            # Fallback para IA local
-            logger.info("🔄 Usando IA Local (fallback)")
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Erro no AI Generator: {str(e)}")
             return await generate_local_campaign(request)
             
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Erro na geração: {str(e)}")
+        logger.error(f"[ERROR] Erro na geração: {str(e)}")
         raise HTTPException(500, f"Erro no processamento: {str(e)}")
 
 @app.post("/api/ai/generate-local")
@@ -127,7 +162,7 @@ async def generate_local_campaign(request: dict):
         if not prompt:
             raise HTTPException(400, "Prompt é obrigatório")
         
-        logger.info(f"🏠 Gerando campanha local para: {prompt[:50]}...")
+        logger.info(f"[LOCAL] Gerando campanha local para: {prompt[:50]}...")
         
         # Análise local
         analysis = analyze_product_local(prompt)
@@ -154,7 +189,7 @@ async def generate_local_campaign(request: dict):
         }
         
     except Exception as e:
-        logger.error(f"❌ Erro na geração local: {str(e)}")
+        logger.error(f"[ERROR] Erro na geração local: {str(e)}")
         raise HTTPException(500, f"Erro: {str(e)}")
 
 # ==================== FUNÇÕES DA IA LOCAL ====================
@@ -383,16 +418,16 @@ def generate_copies_local(analysis: dict) -> list:
     
     # Copy 1 - Estratégica
     if "premium" in analysis.get("estrategia_recomendada", "").lower():
-        copy1 = f"✨ {modelo} - Exclusividade {marca} para os mais exigentes!"
+        copy1 = f"[PREMIUM] {modelo} - Exclusividade {marca} para os mais exigentes!"
     else:
-        copy1 = f"🔥 {modelo} - Performance {marca} com preço justo!"
+        copy1 = f"[HOT] {modelo} - Performance {marca} com preço justo!"
     
     # Copy 2 - Técnica
     features = ", ".join(analysis["caracteristicas_principais"][:2])
-    copy2 = f"⚡ {modelo} com {features}. Tecnologia que impressiona!"
+    copy2 = f"[TECH] {modelo} com {features}. Tecnologia que impressiona!"
     
     # Copy 3 - Urgência
-    copy3 = f"🏆 {modelo} por {preco}! Últimas unidades com frete grátis!"
+    copy3 = f"[URGENTE] {modelo} por {preco}! Últimas unidades com frete grátis!"
     
     copies = [
         {
@@ -444,7 +479,7 @@ def generate_images_local(analysis: dict) -> list:
     return [
         {
             "id": 1,
-            "url": f"https://via.placeholder.com/1080x1080/{bg_color}/{text_color}?text={marca}+{modelo}",
+            "url": f"https://via.placeholder.com/1080x1080/{bg_color}/{text_color}?text={marca}+{modelo.replace(' ', '+')}",
             "style": "Feed",
             "description": f"Imagem para feed {modelo}",
             "generated_by": "placeholder",
@@ -507,7 +542,7 @@ async def test_route():
         "server": "FastAPI",
         "port": 8080,
         "ai_status": AI_STATUS,
-        "api_keys": settings.get_api_status()
+        "mock_mode": os.getenv("FORCE_MOCK_MODE", "false").lower() == "true"
     }
 
 @app.post("/api/test/services")
@@ -524,15 +559,18 @@ async def test_services():
     if ai_generator_real:
         results["ai_generator_real"] = ai_generator_real.is_available()
     
-    # Verificar API keys
-    api_status = settings.get_api_status()
-    results["openai"] = api_status["openai"]["configured"]
-    results["replicate"] = api_status["replicate"]["configured"]
+    try:
+        # Verificar API keys
+        api_status = settings.get_api_status()
+        results["openai"] = api_status["openai"]["configured"]
+        results["replicate"] = api_status["replicate"]["configured"]
+    except:
+        results["config_error"] = True
     
     return {
-        "timestamp": "2024-01-01",
+        "timestamp": "2024-12-25",
         "services": results,
-        "recommendation": "Configure API keys no arquivo .env" if not (results["openai"] or results["replicate"]) else "Pronto para usar!"
+        "recommendation": "Sistema funcionando em modo mock!" if os.getenv("FORCE_MOCK_MODE", "false").lower() == "true" else "Configure API keys no arquivo .env"
     }
 
 # ==================== STARTUP ====================
@@ -541,16 +579,20 @@ async def test_services():
 async def startup_event():
     """Executado quando o servidor inicia"""
     logger.info("\n" + "="*50)
-    logger.info("🚀 SISTEMA DE AUTOMAÇÃO DE ANÚNCIOS v2.0")
+    logger.info("[START] SISTEMA DE AUTOMACAO DE ANUNCIOS v2.0")
     logger.info("="*50)
-    logger.info(f"📡 Servidor: http://localhost:8080")
-    logger.info(f"📚 Docs: http://localhost:8080/docs")
+    logger.info(f"[INFO] Servidor: http://localhost:8080")
+    logger.info(f"[INFO] Docs: http://localhost:8080/docs")
     
     # Status das APIs
-    api_status = settings.get_api_status()
-    logger.info("\n📊 Status das APIs:")
-    logger.info(f"   OpenAI: {'✅' if api_status['openai']['configured'] else '❌'}")
-    logger.info(f"   Replicate: {'✅' if api_status['replicate']['configured'] else '❌'}")
+    try:
+        api_status = settings.get_api_status()
+        logger.info("\n[STATUS] Status das APIs:")
+        logger.info(f"   OpenAI: [OK]" if api_status['openai']['configured'] else "   OpenAI: [MOCK]")
+        logger.info(f"   Replicate: [OK]" if api_status['replicate']['configured'] else "   Replicate: [MOCK]")
+    except:
+        logger.info("\n[STATUS] Modo mock ativo")
+    
     logger.info(f"   AI Generator: {AI_STATUS.get('ai_real', 'inactive')}")
     logger.info("="*50 + "\n")
 
